@@ -1,11 +1,13 @@
+#!/usr/bin/python3
 import Hamlib
 import pyaudio
 import threading
 import numpy as np
-from scipy import signal
 from PyQt5 import QtGui, QtCore, QtWidgets
-from PyQt5.QtWidgets import QVBoxLayout
+from PyQt5.QtWidgets import QVBoxLayout,QHBoxLayout,QLCDNumber,QPushButton
+from PyQt5.QtCore import pyqtSlot
 import matplotlib
+import matplotlib.pyplot as plt
 matplotlib.use('Qt5Agg')
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
@@ -13,7 +15,7 @@ from matplotlib.figure import Figure
 
 
 class AudioRecorder(object):
-    def __init__(self, pa, dev, rate=48000):
+    def __init__(self, pa, dev, rate=8000):
         self.rate = rate
         self.bufSize = 1024
         self.pa = pa
@@ -61,6 +63,9 @@ class MainWindow(QtWidgets.QWidget):
         # Set up the data
         self.setupFFT()
         
+        # Update the radio frequency from the radio
+        self.lcd.display(self.rigFreq)
+        
         # Set up the timer for updating the window and audio
         timer = QtCore.QTimer()
         timer.timeout.connect(self.update)
@@ -84,19 +89,36 @@ class MainWindow(QtWidgets.QWidget):
         self.rig.set_conf("rig_pathname", "/dev/ttyUSB0")
         self.rig.set_conf("retry", "5")
         self.rig.open()
+        self.rigFreq = self.rig.get_freq()
+        print(self.rig.get_mode())
 
     # Set up the UI
     def setupUI(self):
-        # Set up the widget
+        # Set up the Layout
         vbox = QVBoxLayout()
+
+        # Set up the frequency input
+        hbox = QHBoxLayout()
+        self.lcd = QLCDNumber(self)
+        self.lcd.setDigitCount(10)
+        hbox.addWidget(self.lcd)
+        lcdVbox = QVBoxLayout()
+        self.freqUp = QPushButton("+")
+        self.freqUp.clicked.connect(self.doFreqUp)
+        self.freqDown = QPushButton("-")
+        self.freqDown.clicked.connect(self.doFreqDown)
+        lcdVbox.addWidget(self.freqUp)
+        lcdVbox.addWidget(self.freqDown)
+        hbox.addLayout(lcdVbox)
+        vbox.addLayout(hbox)
+
+        # Set up the plotting widget
         self.figure = Figure(facecolor='white')
         self.canvas = FigureCanvas(self.figure)
-        self.toolbar = NavigationToolbar(self.canvas, self)
-        vbox.addWidget(self.toolbar)
         vbox.addWidget(self.canvas)
         self.setLayout(vbox)
 
-        self.setGeometry(300, 300, 350, 300)
+        self.setGeometry(0, 0, 800, 600)
         self.setWindowTitle('FFT')
         self.show()
 
@@ -111,16 +133,14 @@ class MainWindow(QtWidgets.QWidget):
             dev = self.pa.get_device_info_by_index(i)
             if (dev.get('maxInputChannels') > 0):
                 print(" ",i, dev['name'])
-
             # FIXME
             if (dev['name'].startswith("pulse")):
                 pd = dev
                 pn = i
         self.ar = AudioRecorder(self.pa, pn)
 
-        # Set up the audio data for processing
+        # Get the audio frequencies for printing
         self.freq = np.fft.rfftfreq(self.ar.bufSize, 1.0/self.ar.rate)
-        self.time = np.arange(self.ar.bufSize, dtype=np.float32) / self.ar.rate * 1000.0
 
         # Start recording
         self.ar.start()
@@ -128,35 +148,74 @@ class MainWindow(QtWidgets.QWidget):
     # Set up the initial FFT window
     def setupFFT(self):
         # FFT axis markers
-        self.fft = self.figure.add_subplot(111)
-        self.fft.set_ylim(0, 1)
+        self.fft = self.figure.add_subplot(211)
+        self.fft.set_ylim(0, 1.0)
         self.fft.set_xlim(0, self.freq.max())
         self.fft.set_xlabel(u'frequency (Hz)', fontsize=6)
-        # FFT Line data
+        # Set up the plot
         self.fftLine = self.fft.plot(self.freq, np.ones_like(self.freq))
+        
+        # Waterfall
+        # FFT Data over time
+        # FIXME: Make this variable...
+        self.fftLineCt = 512
+        self.fftData = np.zeros((self.fftLineCt, int(self.ar.bufSize/2) + 1))
+
+        # The waterfall plot
+        self.waterfall = self.figure.add_subplot(212)
+        self.waterfall.set_ylim(0, self.fftLineCt)
+        self.waterfall.set_ylabel(u'Time', fontsize=6)
+        self.waterfall.set_xlim(0, 513)
+        # Plot with imshow
+        self.waterfallPlot = self.waterfall.imshow(self.fftData, cmap='inferno', aspect='auto', interpolation='nearest')
+
+    # Change the frequency up
+    @pyqtSlot()
+    def doFreqUp(self):
+       self.rigFreq += 1000 
+       self.rig.set_freq(Hamlib.RIG_VFO_A, self.rigFreq)
+       self.lcd.display(self.rigFreq)
+
+    # Change the frequency down
+    @pyqtSlot()
+    def doFreqDown(self):
+       self.rigFreq -= 1000 
+       self.rig.set_freq(Hamlib.RIG_VFO_A, self.rigFreq)
+       self.lcd.display(self.rigFreq)
 
     # Update the FFT Window and get new data
     def update(self):
         # Get new data
         framesList = self.ar.getFrames()
+        toFFT = len(framesList)
 
-        # Convert input data to numpy
-        print(len(framesList))
-        frames = np.empty([len(framesList), self.ar.bufSize], dtype=np.float32)
-        for i in range(len(framesList)):
-            frames[i,:] = np.frombuffer(framesList[i], dtype=np.int16).astype(np.float32)
+        # Make sure we have data to process
+        if (toFFT > 0):
+            # Convert input data to numpy
+            frames = np.empty([toFFT, self.ar.bufSize], dtype=np.float32)
+            for i in range(toFFT):
+                frames[i,:] = np.frombuffer(framesList[i], dtype=np.int16).astype(np.float32)
 
-        if len(frames) > 0:
-            # Average the frames
-            data = np.mean(frames, axis=0)
-
-            # computes and plots the fft signal            
-            fftSig = np.fft.rfft(data)
-            fftSig /= np.abs(fftSig).max()
-            self.fftLine[0].set_data(self.freq, np.abs(fftSig))
+            # Computes the FFT
+            fftSig = np.abs(np.fft.rfft(frames))
             
+            # Normalize
+            oneLine = fftSig[0] / fftSig.max()
+
+            # Copy the result into the data array
+            self.fftData[toFFT:self.fftLineCt, :] = self.fftData[0:self.fftLineCt-toFFT, :]
+            self.fftData[0:toFFT,:] = fftSig
+
+            # Plot the first one as the line data
+            self.fftLine[0].set_data(self.freq, oneLine)
+
+            # Plot the waterfall
+            #self.waterfallPlot.set_data(self.fftData)
+            self.waterfallPlot = self.waterfall.imshow(self.fftData, cmap='inferno', aspect='auto', interpolation='nearest')
+
             # Refresh the plot
             self.canvas.draw()
+            self.canvas.flush_events()
 
 app = QtWidgets.QApplication([])
 mw = MainWindow()
