@@ -6,12 +6,7 @@ import numpy as np
 from PyQt5 import QtGui, QtCore, QtWidgets
 from PyQt5.QtWidgets import QVBoxLayout,QHBoxLayout,QLCDNumber,QPushButton
 from PyQt5.QtCore import pyqtSlot
-import matplotlib
-import matplotlib.pyplot as plt
-matplotlib.use('Qt5Agg')
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.figure import Figure
+import pyqtgraph as pg
 
 
 class AudioRecorder(object):
@@ -51,26 +46,26 @@ class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         QtWidgets.QWidget.__init__(self)
 
-        # Set up the UI
-        self.setupUI()
-
         # Set up the audio
         self.setupAudio()
 
         # Set up the rig
         self.setupRig(311)
 
+        # Set up the UI
+        self.setupUI()
+
         # Set up the data
         self.setupFFT()
         
         # Update the radio frequency from the radio
         self.lcd.display(self.rigFreq)
-        
+
         # Set up the timer for updating the window and audio
         timer = QtCore.QTimer()
         timer.timeout.connect(self.update)
         # FIXME: Make user controlled
-        timer.start(100)
+        timer.start(50)
         self.timer = timer
 
     # Get a list of supported models from hamlib
@@ -90,7 +85,6 @@ class MainWindow(QtWidgets.QWidget):
         self.rig.set_conf("retry", "5")
         self.rig.open()
         self.rigFreq = self.rig.get_freq()
-        print(self.rig.get_mode())
 
     # Set up the UI
     def setupUI(self):
@@ -112,14 +106,27 @@ class MainWindow(QtWidgets.QWidget):
         hbox.addLayout(lcdVbox)
         vbox.addLayout(hbox)
 
-        # Set up the plotting widget
-        self.figure = Figure(facecolor='white')
-        self.canvas = FigureCanvas(self.figure)
-        vbox.addWidget(self.canvas)
-        self.setLayout(vbox)
+        # Set up the FFT plotting widget
+        self.fft = pg.PlotWidget(name='FFT')
+        vbox.addWidget(self.fft)
+        self.fftPlot = self.fft.plot()
+        self.fftPlot.setPen((255,255,255))
+        self.fft.setLabel('bottom', 'Frequency', units='Hz')
+        self.fft.setYRange(0, 1.0)
+        self.fft.setXRange(0, self.freq.max())
 
+        # Set up the Waterfall plotting widget
+        self.waterfall = pg.PlotWidget(name='Waterfall')
+        self.waterfall.setLabel('left', 'Time')
+        self.waterfallPlot = pg.ImageItem()
+        self.waterfall.clear()
+        self.waterfall.addItem(self.waterfallPlot)
+        vbox.addWidget(self.waterfall)
+
+        # Set the layout and geometry and show the GUI
+        self.setLayout(vbox)
         self.setGeometry(0, 0, 800, 600)
-        self.setWindowTitle('FFT')
+        self.setWindowTitle('ICOM IC-706 MKIIG Control and FFT')
         self.show()
 
     # Set up the audio
@@ -147,27 +154,10 @@ class MainWindow(QtWidgets.QWidget):
 
     # Set up the initial FFT window
     def setupFFT(self):
-        # FFT axis markers
-        self.fft = self.figure.add_subplot(211)
-        self.fft.set_ylim(0, 1.0)
-        self.fft.set_xlim(0, self.freq.max())
-        self.fft.set_xlabel(u'frequency (Hz)', fontsize=6)
-        # Set up the plot
-        self.fftLine = self.fft.plot(self.freq, np.ones_like(self.freq))
-        
-        # Waterfall
         # FFT Data over time
         # FIXME: Make this variable...
         self.fftLineCt = 512
         self.fftData = np.zeros((self.fftLineCt, int(self.ar.bufSize/2) + 1))
-
-        # The waterfall plot
-        self.waterfall = self.figure.add_subplot(212)
-        self.waterfall.set_ylim(0, self.fftLineCt)
-        self.waterfall.set_ylabel(u'Time', fontsize=6)
-        self.waterfall.set_xlim(0, 513)
-        # Plot with imshow
-        self.waterfallPlot = self.waterfall.imshow(self.fftData, cmap='inferno', aspect='auto', interpolation='nearest')
 
     # Change the frequency up
     @pyqtSlot()
@@ -207,15 +197,11 @@ class MainWindow(QtWidgets.QWidget):
             self.fftData[0:toFFT,:] = fftSig
 
             # Plot the first one as the line data
-            self.fftLine[0].set_data(self.freq, oneLine)
+            self.fftPlot.setData(self.freq, oneLine)
 
             # Plot the waterfall
-            #self.waterfallPlot.set_data(self.fftData)
-            self.waterfallPlot = self.waterfall.imshow(self.fftData, cmap='inferno', aspect='auto', interpolation='nearest')
+            self.waterfallPlot.setImage(np.rot90(self.fftData,3), autoLevels=True, autoRange=False)
 
-            # Refresh the plot
-            self.canvas.draw()
-            self.canvas.flush_events()
 
 app = QtWidgets.QApplication([])
 mw = MainWindow()
